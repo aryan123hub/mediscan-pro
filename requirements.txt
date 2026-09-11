@@ -1,0 +1,9 @@
+streamlit
+pandas
+PyMuPDF
+plotly
+xgboost
+scikit-learn
+groq
+numpy
+psycopg2-binary
