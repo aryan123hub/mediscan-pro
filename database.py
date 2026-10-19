@@ -55,8 +55,8 @@ def save_patient(patient_data):
     cursor.execute("""
         INSERT INTO patients 
         (name, age, gender, phone, email, blood_group, conditions, allergies,
-         chief_complaint, symptoms, bp, pulse, temperature, red_flags, username, password)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+         chief_complaint, symptoms, bp, pulse, temperature, red_flags, username, password, ayurveda_data)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         RETURNING patient_id
     """, (
         patient_data.get("name"), patient_data.get("age"),
@@ -67,7 +67,7 @@ def save_patient(patient_data):
         patient_data.get("bp"), patient_data.get("pulse"),
         patient_data.get("temperature"),
         ", ".join(patient_data.get("red_flags", [])),
-        patient_data.get("username"), patient_data.get("password")
+        patient_data.get("username"), patient_data.get("password"), patient_data.get("ayurveda_data")
     ))
     patient_id = cursor.fetchone()[0]
     conn.commit()
@@ -304,28 +304,26 @@ def get_sms_log(patient_id):
 
 
 # ---------- REPORT FUNCTIONS ----------
-def save_report(patient_id, filename, parameters):
+# database.py
+
+def save_report(patient_id, filename, parameters, file_data=None):
     conn = get_connection()
     cursor = conn.cursor()
     cursor.execute("""
-        INSERT INTO reports (patient_id, filename, parameters)
-        VALUES (%s, %s, %s)
+        INSERT INTO reports (patient_id, filename, parameters, file_data)
+        VALUES (%s, %s, %s, %s)
         RETURNING report_id
-    """, (patient_id, filename, json.dumps(parameters)))
+    """, (patient_id, filename, json.dumps(parameters), file_data))
     report_id = cursor.fetchone()[0]
     conn.commit()
     cursor.close()
     conn.close()
     return report_id
 
-
 def get_patient_reports(patient_id):
     conn = get_connection()
     cursor = conn.cursor(cursor_factory=RealDictCursor)
-    cursor.execute(
-        "SELECT * FROM reports WHERE patient_id = %s ORDER BY uploaded_at DESC",
-        (patient_id,)
-    )
+    cursor.execute("SELECT * FROM reports WHERE patient_id = %s ORDER BY uploaded_at DESC", (patient_id,))
     rows = cursor.fetchall()
     cursor.close()
     conn.close()
@@ -337,6 +335,13 @@ def get_patient_reports(patient_id):
         reports.append(d)
     return reports
 
+def save_doctor_notes(appointment_id, notes):
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("UPDATE appointments SET doctor_notes = %s WHERE appointment_id = %s", (notes, appointment_id))
+    conn.commit()
+    cursor.close()
+    conn.close()
 
 # ---------- SEED DEFAULT DOCTORS ----------
 def seed_default_doctors():

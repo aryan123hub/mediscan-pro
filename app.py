@@ -1,4 +1,3 @@
-#AI Medical Report Analyzer & Health Risk Screening Platform
 import streamlit as st
 import fitz
 import pandas as pd
@@ -10,6 +9,8 @@ import plotly.express as px
 import pickle
 import os
 import random
+import json
+from fpdf import FPDF
 
 # ---------- VOICE & AI ----------
 try:
@@ -28,28 +29,15 @@ except:
 import database as db
 import ai_triage
 import sms_service
+import completeness_engine
+import security
 
 # ---------- PAGE CONFIG ----------
-st.set_page_config(
-    page_title="MediScan Pro",
-    page_icon="🩺",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
+st.set_page_config(page_title="MediScan Pro", page_icon="🩺", layout="wide", initial_sidebar_state="expanded")
 
-# ============================================================
-# 🔑 GROQ API KEY - YAHAN APNI NAYI KEY DAALO
-# ============================================================
-import os
-
-GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
-
-try:
-    import streamlit as st
-    if st.secrets.get("GROQ_API_KEY"):
-        GROQ_API_KEY = st.secrets.get("GROQ_API_KEY")
-except:
-    pass  # ← YAHAN APNI KEY DAALO
+# ---------- API KEY SETUP ----------
+try: GROQ_API_KEY = st.secrets.get("GROQ_API_KEY", "")
+except: GROQ_API_KEY = ""
 
 # ---------- LOAD AI MODELS ----------
 @st.cache_resource
@@ -57,424 +45,157 @@ def load_models():
     models = {"diabetes": None, "heart": None}
     try:
         if os.path.exists("diabetes_model.pkl"):
-            with open("diabetes_model.pkl", "rb") as f:
-                models["diabetes"] = pickle.load(f)
+            with open("diabetes_model.pkl", "rb") as f: models["diabetes"] = pickle.load(f)
     except: pass
     try:
         if os.path.exists("heart_model.pkl"):
-            with open("heart_model.pkl", "rb") as f:
-                models["heart"] = pickle.load(f)
+            with open("heart_model.pkl", "rb") as f: models["heart"] = pickle.load(f)
     except: pass
     return models
-
 models = load_models()
 
-# ---------- SESSION STATE ----------
-if 'page' not in st.session_state:
-    st.session_state.page = "🏠 Home"
-if 'logged_in_patient' not in st.session_state:
-    st.session_state.logged_in_patient = None
-if 'logged_in_doctor' not in st.session_state:
-    st.session_state.logged_in_doctor = None
-if 'current_results' not in st.session_state:
-    st.session_state.current_results = None
+# ---------- MULTILINGUAL DICTIONARY ----------
+TEXT = {
+    "English": {
+        "home": "🏠 Home", "patient_reg": "👤 Patient Register", "patient_login": "🔐 Patient Login",
+        "doc_login": "👨‍⚕️ Doctor Login", "doc_dash": "🩺 Doctor Dashboard", "chatbot": "💬 AI Chatbot",
+        "about": "ℹ️ About", "logout": "🚪 Logout", "sys_title": "AI-Powered Patient Case-Taking System",
+        "name": "Full Name*", "age": "Age*", "gender": "Gender", "phone": "Phone*", "blood": "Blood Group",
+        "user": "Username*", "pass": "Password*", "complaint": "Chief Complaint*", "ayush": "🕉️ AYUSH Assessment (Optional)",
+        "prakriti": "Prakriti", "agni": "Agni (Digestion)", "koshtha": "Koshtha (Bowel)", "vitals": "Vitals",
+        "register_btn": "💾 Register Patient", "login_btn": "🔐 Login", "upload_pdf": "Upload PDF Report",
+        "analyzing": "🔍 Analyzing...", "save": "💾 Save", "view_pdf": "📄 Original Report",
+        "notes": "📝 Doctor's Notes", "presc": "💊 Prescription", "diagnosis": "Diagnosis", "meds": "Medicines",
+        "download_pdf": "📥 Download Prescription PDF"
+    },
+    "Hindi": {
+        "home": "🏠 होम", "patient_reg": "👤 मरीज़ रजिस्टर", "patient_login": "🔐 मरीज़ लॉगिन",
+        "doc_login": "👨‍⚕️ डॉक्टर लॉगिन", "doc_dash": "🩺 डॉक्टर डैशबोर्ड", "chatbot": "💬 एआई चैटबॉट",
+        "about": "ℹ️ ऐप के बारे में", "logout": "🚪 लॉगआउट", "sys_title": "एआई-आधारित मरीज़ केस-टेकिंग सिस्टम",
+        "name": "पूरा नाम*", "age": "उम्र*", "gender": "लिंग", "phone": "फ़ोन नंबर*", "blood": "ब्लड ग्रुप",
+        "user": "यूज़रनेम*", "pass": "पासवर्ड*", "complaint": "मुख्य शिकायत*", "ayush": "🕉️ आयुष मूल्यांकन (वैकल्पिक)",
+        "prakriti": "प्रकृति", "agni": "अग्नि (पाचन)", "koshtha": "कोष्ठ (पेट)", "vitals": "बुनियादी स्वास्थ्य जांच",
+        "register_btn": "💾 मरीज़ रजिस्टर करें", "login_btn": "🔐 लॉगिन करें", "upload_pdf": "रिपोर्ट अपलोड करें",
+        "analyzing": "🔍 जांच हो रही है...", "save": "💾 सेव करें", "view_pdf": "📄 मूल रिपोर्ट",
+        "notes": "📝 डॉक्टर के नोट्स", "presc": "💊 पर्चा (दवाइयां)", "diagnosis": "बीमारी का नाम", "meds": "दवाइयां",
+        "download_pdf": "📥 पर्चा डाउनलोड करें"
+    }
+}
 
-# ---------- CUSTOM CSS ----------
+# ---------- SESSION STATE ----------
+if 'page' not in st.session_state: st.session_state.page = "🏠 Home"
+if 'language' not in st.session_state: st.session_state.language = "English"
+if 'logged_in_patient' not in st.session_state: st.session_state.logged_in_patient = None
+if 'logged_in_doctor' not in st.session_state: st.session_state.logged_in_doctor = None
+if 'current_results' not in st.session_state: st.session_state.current_results = None
+if 'chat' not in st.session_state: st.session_state.chat = []
+
+T = TEXT[st.session_state.language]
+
+# ---------- CUSTOM CSS (3D Premium UI) ----------
 st.markdown("""
 <style>
     @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&display=swap');
     * { font-family: 'Inter', sans-serif; }
     
-    .stApp { background: #0a0a1a; }
-    .stApp::before {
-        content: '';
-        position: fixed;
-        top: -50%; left: -50%;
-        width: 200%; height: 200%;
-        background: 
-            radial-gradient(ellipse at 20% 50%, rgba(99, 102, 241, 0.08) 0%, transparent 50%),
-            radial-gradient(ellipse at 80% 20%, rgba(139, 92, 246, 0.06) 0%, transparent 50%);
-        animation: rotateBg 60s linear infinite;
-        z-index: 0;
-        pointer-events: none;
-    }
-    @keyframes rotateBg {
-        0% { transform: rotate(0deg); }
-        100% { transform: rotate(360deg); }
+    .stApp { 
+        background: radial-gradient(circle at 15% 50%, rgba(99, 102, 241, 0.15), transparent 25%),
+                    radial-gradient(circle at 85% 30%, rgba(139, 92, 246, 0.15), transparent 25%),
+                    #0a0a1a; 
     }
     
-    .main-title {
-        font-size: 3.5rem;
-        font-weight: 900;
-        text-align: center;
-        background: linear-gradient(135deg, #818cf8, #a78bfa, #c084fc);
-        background-size: 300% 300%;
-        -webkit-background-clip: text;
-        -webkit-text-fill-color: transparent;
-        animation: gradientMove 4s ease-in-out infinite;
+    .main-title { 
+        font-size: 4rem; font-weight: 900; text-align: center; 
+        background: linear-gradient(135deg, #a78bfa, #818cf8, #c084fc, #818cf8); 
+        background-size: 300% 300%; -webkit-background-clip: text; -webkit-text-fill-color: transparent; 
+        animation: gradientMove 5s ease-in-out infinite; text-shadow: 0px 0px 30px rgba(129, 140, 248, 0.3);
     }
-    @keyframes gradientMove {
-        0%, 100% { background-position: 0% 50%; }
-        50% { background-position: 100% 50%; }
-    }
+    @keyframes gradientMove { 0%, 100% { background-position: 0% 50%; } 50% { background-position: 100% 50%; } }
     
-    .subtitle {
-        text-align: center;
-        color: #94a3b8;
-        font-size: 1.1rem;
-        letter-spacing: 2px;
-    }
+    .subtitle { text-align: center; color: #94a3b8; font-size: 1.2rem; letter-spacing: 3px; text-transform: uppercase; margin-bottom: 2rem; }
+    .ios-card { background: rgba(20, 20, 50, 0.6); backdrop-filter: blur(30px); border-radius: 28px; padding: 2rem; margin: 1.2rem 0; border: 1px solid rgba(255, 255, 255, 0.06); box-shadow: 0 20px 60px rgba(0, 0, 0, 0.4); }
     
-    .ios-card {
-        background: rgba(20, 20, 50, 0.6);
-        backdrop-filter: blur(30px);
-        border-radius: 28px;
-        padding: 2rem;
-        margin: 1.2rem 0;
-        border: 1px solid rgba(255, 255, 255, 0.06);
-        box-shadow: 0 20px 60px rgba(0, 0, 0, 0.4);
+    .card-3d { 
+        background: rgba(30, 30, 70, 0.4); backdrop-filter: blur(20px); border-radius: 24px; padding: 2rem; text-align: center;
+        border: 1px solid rgba(255, 255, 255, 0.08); box-shadow: 0 20px 40px rgba(0, 0, 0, 0.5), inset 0 1px 0 rgba(255,255,255,0.1); 
+        transition: all 0.4s cubic-bezier(0.175, 0.885, 0.32, 1.275); transform: perspective(1000px) rotateX(5deg) translateY(0);
     }
+    .card-3d:hover { transform: perspective(1000px) rotateX(0deg) translateY(-10px) scale(1.02); box-shadow: 0 30px 60px rgba(129, 140, 248, 0.2), inset 0 1px 0 rgba(255,255,255,0.2); border-color: rgba(129, 140, 248, 0.4); }
+    .card-3d h3 { font-size: 3rem; font-weight: 800; margin: 0; color: #fff; text-shadow: 0 0 20px rgba(255,255,255,0.3); }
+    .card-3d p { color: #a78bfa; margin-top: 10px; font-size: 1rem; font-weight: 600; letter-spacing: 1px; }
     
-    .metric-card {
-        background: linear-gradient(145deg, rgba(30, 30, 70, 0.6), rgba(15, 15, 40, 0.6));
-        border-radius: 20px;
-        padding: 1.5rem;
-        text-align: center;
-        border: 1px solid rgba(255, 255, 255, 0.04);
-        transition: all 0.3s ease;
-    }
-    .metric-card:hover {
-        transform: translateY(-6px) scale(1.02);
-        box-shadow: 0 12px 40px rgba(129, 140, 248, 0.2);
-    }
-    .metric-card h3 { font-size: 2.5rem; font-weight: 800; color: #e2e8f0; margin: 0; }
-    .metric-card p { color: #94a3b8; margin: 0; font-size: 0.9rem; }
-    .metric-card.green { background: linear-gradient(145deg, rgba(52, 211, 153, 0.12), rgba(16, 185, 129, 0.05)); }
-    .metric-card.green h3 { color: #34d399; }
-    .metric-card.red { background: linear-gradient(145deg, rgba(248, 113, 113, 0.12), rgba(239, 68, 68, 0.05)); }
-    .metric-card.red h3 { color: #f87171; }
-    .metric-card.cyan { background: linear-gradient(145deg, rgba(34, 211, 238, 0.12), rgba(6, 182, 212, 0.05)); }
-    .metric-card.cyan h3 { color: #22d3ee; }
-    .metric-card.orange { background: linear-gradient(145deg, rgba(251, 191, 36, 0.12), rgba(245, 158, 11, 0.05)); }
-    .metric-card.orange h3 { color: #fbbf24; }
-    .metric-card.purple { background: linear-gradient(145deg, rgba(167, 139, 250, 0.12), rgba(139, 92, 246, 0.05)); }
-    .metric-card.purple h3 { color: #a78bfa; }
+    .health-tip { background: linear-gradient(90deg, rgba(52, 211, 153, 0.1), transparent); border-left: 4px solid #34d399; padding: 1rem 1.5rem; border-radius: 8px; color: #e2e8f0; font-weight: 500; }
+    .stButton > button { background: linear-gradient(135deg, #6366f1, #8b5cf6) !important; color: white !important; border: none !important; border-radius: 50px !important; padding: 0.8rem 2rem !important; font-weight: 700 !important; box-shadow: 0 10px 20px rgba(99, 102, 241, 0.3) !important; transition: all 0.3s ease !important; }
+    .stButton > button:hover { transform: translateY(-3px) scale(1.02) !important; box-shadow: 0 15px 30px rgba(99, 102, 241, 0.5) !important; }
     
-    .health-tip {
-        background: linear-gradient(145deg, rgba(52, 211, 153, 0.08), rgba(16, 185, 129, 0.03));
-        border-left: 4px solid #34d399;
-        padding: 1.2rem 1.5rem;
-        border-radius: 16px;
-        margin: 0.5rem 0;
-        color: #e2e8f0;
-    }
-    .health-tip-warning {
-        background: linear-gradient(145deg, rgba(251, 191, 36, 0.08), rgba(245, 158, 11, 0.03));
-        border-left-color: #fbbf24;
-    }
-    
-    .bubble {
-        display: inline-block;
-        padding: 0.6rem 1.5rem;
-        border-radius: 50px;
-        font-weight: 600;
-        font-size: 0.85rem;
-        margin: 0.3rem;
-        background: linear-gradient(135deg, #818cf8, #a78bfa);
-        color: white;
-    }
-    .bubble-red { background: linear-gradient(135deg, #f87171, #ef4444); }
-    .bubble-green { background: linear-gradient(135deg, #34d399, #10b981); }
-    
-    .stButton > button {
-        background: linear-gradient(135deg, #818cf8, #a78bfa) !important;
-        color: white !important;
-        border: none !important;
-        border-radius: 50px !important;
-        padding: 0.7rem 2rem !important;
-        font-weight: 600 !important;
-        transition: all 0.3s ease !important;
-    }
-    .stButton > button:hover {
-        transform: translateY(-3px) scale(1.05) !important;
-        box-shadow: 0 8px 24px rgba(129, 140, 248, 0.3) !important;
-    }
-    
-    .css-1d391kg {
-        background: linear-gradient(180deg, rgba(15, 15, 40, 0.95), rgba(10, 10, 26, 0.98)) !important;
-    }
-    .css-1d391kg .stRadio label { color: #e2e8f0 !important; }
-    
-    .todo-item {
-        padding: 0.7rem 1rem;
-        background: rgba(129, 140, 248, 0.04);
-        border-radius: 14px;
-        margin: 0.4rem 0;
-        color: #e2e8f0;
-        font-size: 0.9rem;
-    }
-    
-    .tip-card {
-        background: rgba(20, 20, 50, 0.4);
-        padding: 0.9rem 1.2rem;
-        border-radius: 16px;
-        margin: 0.4rem 0;
-        color: #e2e8f0;
-        border-left: 4px solid #818cf8;
-        font-size: 0.9rem;
-    }
-    
-    .patient-info {
-        background: linear-gradient(145deg, rgba(129, 140, 248, 0.1), rgba(167, 139, 250, 0.05));
-        border-radius: 20px;
-        padding: 1.5rem;
-        border: 1px solid rgba(129, 140, 248, 0.1);
-        margin: 1rem 0;
-    }
-    .patient-info h3 { color: #818cf8; margin-bottom: 1rem; }
-    .patient-info p { color: #e2e8f0; margin: 0.3rem 0; }
-    
-    .token-card {
-        background: linear-gradient(135deg, #818cf8, #a78bfa);
-        border-radius: 24px;
-        padding: 2rem;
-        text-align: center;
-        color: white;
-        margin: 1rem 0;
-        box-shadow: 0 20px 60px rgba(129, 140, 248, 0.3);
-    }
+    .patient-info { background: linear-gradient(145deg, rgba(129, 140, 248, 0.1), rgba(167, 139, 250, 0.05)); border-radius: 20px; padding: 1.5rem; border: 1px solid rgba(129, 140, 248, 0.1); margin: 1rem 0; }
+    .token-card { background: linear-gradient(135deg, #818cf8, #a78bfa); border-radius: 24px; padding: 2rem; text-align: center; color: white; margin: 1rem 0; }
     .token-card h1 { font-size: 5rem; font-weight: 900; margin: 0; }
-    .token-card p { font-size: 1.2rem; margin: 0.5rem 0 0 0; opacity: 0.9; }
-    
-    .doctor-card {
-        background: linear-gradient(145deg, rgba(52, 211, 153, 0.1), rgba(16, 185, 129, 0.05));
-        border-radius: 20px;
-        padding: 1.5rem;
-        border: 1px solid rgba(52, 211, 153, 0.2);
-        margin: 0.5rem 0;
-    }
-    .doctor-card h3 { color: #34d399; margin: 0; }
-    .doctor-card p { color: #e2e8f0; margin: 0.3rem 0; }
-    
-    .footer {
-        text-align: center;
-        padding: 1.5rem 0;
-        color: #475569;
-        border-top: 1px solid rgba(255, 255, 255, 0.03);
-        margin-top: 2rem;
-        font-size: 0.85rem;
-    }
-    
-    ::-webkit-scrollbar { width: 6px; }
-    ::-webkit-scrollbar-track { background: rgba(30, 30, 60, 0.3); }
-    ::-webkit-scrollbar-thumb { background: #818cf8; border-radius: 10px; }
+    .footer { text-align: center; padding: 1.5rem 0; color: #475569; margin-top: 3rem; font-size: 0.85rem; }
 </style>
 """, unsafe_allow_html=True)
 
-# ---------- REFERENCE RANGES ----------
-reference_ranges = {
-    "Hemoglobin": {"min": 13.0, "max": 17.0, "unit": "g/dL", "category": "CBC"},
-    "WBC": {"min": 4.0, "max": 11.0, "unit": "×10³/µL", "category": "CBC"},
-    "Platelets": {"min": 150, "max": 450, "unit": "×10³/µL", "category": "CBC"},
-    "Total Cholesterol": {"min": 125, "max": 200, "unit": "mg/dL", "category": "Lipid"},
-    "Triglycerides": {"min": 0, "max": 150, "unit": "mg/dL", "category": "Lipid"},
-    "HDL Cholesterol": {"min": 40, "max": 60, "unit": "mg/dL", "category": "Lipid"},
-    "LDL Cholesterol": {"min": 0, "max": 130, "unit": "mg/dL", "category": "Lipid"},
-    "Creatinine": {"min": 0.7, "max": 1.3, "unit": "mg/dL", "category": "Renal"},
-    "Uric Acid": {"min": 3.5, "max": 7.2, "unit": "mg/dL", "category": "Renal"},
-    "TSH": {"min": 0.4, "max": 4.0, "unit": "µIU/mL", "category": "Thyroid"},
-    "Fasting Glucose": {"min": 70, "max": 100, "unit": "mg/dL", "category": "Diabetes"},
-    "HbA1c": {"min": 4.0, "max": 5.7, "unit": "%", "category": "Diabetes"},
-    "SGOT (AST)": {"min": 10, "max": 40, "unit": "U/L", "category": "Liver"},
-    "SGPT (ALT)": {"min": 10, "max": 40, "unit": "U/L", "category": "Liver"},
-    "Total Bilirubin": {"min": 0.3, "max": 1.2, "unit": "mg/dL", "category": "Liver"},
-    "Sodium": {"min": 136, "max": 145, "unit": "mEq/L", "category": "Renal"},
-    "Potassium": {"min": 3.5, "max": 5.0, "unit": "mEq/L", "category": "Renal"},
-    "Vitamin D": {"min": 30, "max": 100, "unit": "ng/mL", "category": "Vitamins"},
-    "Vitamin B12": {"min": 200, "max": 900, "unit": "pg/mL", "category": "Vitamins"},
-    "Ferritin": {"min": 20, "max": 500, "unit": "ng/mL", "category": "Iron"},
-    "CRP": {"min": 0, "max": 5, "unit": "mg/L", "category": "Inflammatory"},
-}
-
-patterns = {
-    "Hemoglobin": r"(?:Hb|Haemoglobin|Hemoglobin).*?(\d+\.?\d*)",
-    "Glucose": r"(?:Glucose|Blood Sugar|Fasting).*?(\d+\.?\d*)",
-    "WBC": r"(?:WBC|White Blood Cell).*?(\d+\.?\d*)",
-    "Platelets": r"(?:Platelet|Thrombocyte).*?(\d+\.?\d*)",
-    "Cholesterol": r"(?:Cholesterol|Total Cholesterol).*?(\d+\.?\d*)",
-    "Creatinine": r"Creatinine.*?(\d+\.?\d*)",
-    "TSH": r"TSH.*?(\d+\.?\d*)",
-    "Uric Acid": r"Uric Acid.*?(\d+\.?\d*)",
-    "Triglycerides": r"Triglycerides.*?(\d+\.?\d*)",
-    "HDL Cholesterol": r"HDL.*?(\d+\.?\d*)",
-    "LDL Cholesterol": r"LDL.*?(\d+\.?\d*)",
-    "HbA1c": r"HbA1c.*?(\d+\.?\d*)",
-    "SGOT": r"SGOT.*?(\d+\.?\d*)",
-    "SGPT": r"SGPT.*?(\d+\.?\d*)",
-    "Total Bilirubin": r"Total Bilirubin.*?(\d+\.?\d*)",
-    "Sodium": r"Sodium.*?(\d+\.?\d*)",
-    "Potassium": r"Potassium.*?(\d+\.?\d*)",
-    "Vitamin D": r"Vitamin D.*?(\d+\.?\d*)",
-    "Vitamin B12": r"Vitamin B12.*?(\d+\.?\d*)",
-    "Ferritin": r"Ferritin.*?(\d+\.?\d*)",
-    "CRP": r"CRP.*?(\d+\.?\d*)",
-}
-
-# ---------- HEALTH TIPS ----------
-health_tips = [
-    "🥗 Eat a balanced diet rich in fruits, vegetables, and whole grains",
-    "💧 Drink at least 8 glasses of water daily",
-    "🏃 Exercise for at least 30 minutes, 5 days a week",
-    "😴 Get 7-8 hours of quality sleep every night",
-    "🧘 Practice stress management through meditation or yoga",
-    "🚭 Avoid smoking and limit alcohol consumption",
-    "🩺 Schedule regular health check-ups",
-    "🧠 Keep your brain active - read, learn, solve puzzles",
-]
-
-things_to_do = [
-    "📋 Review your blood test results with your doctor",
-    "📅 Schedule a follow-up appointment if needed",
-    "🥗 Start incorporating healthier food choices",
-    "🏃 Begin or maintain a regular exercise routine",
-    "💊 Take prescribed medications on time",
-    "📊 Track your daily health metrics",
-]
-
-# ---------- HELPER FUNCTIONS ----------
-def get_download_link(df, filename="report.csv"):
-    csv = df.to_csv(index=False)
-    b64 = base64.b64encode(csv.encode()).decode()
-    return f'<a href="data:file/csv;base64,{b64}" download="{filename}" style="text-decoration:none;color:#818cf8;font-weight:600;">📥 Download CSV Report</a>'
+# ---------- CONFIGURATIONS ----------
+reference_ranges = {"Hemoglobin": {"min": 13.0, "max": 17.0, "unit": "g/dL"}, "WBC": {"min": 4.0, "max": 11.0, "unit": "×10³/µL"}, "Platelets": {"min": 150, "max": 450, "unit": "×10³/µL"}, "Total Cholesterol": {"min": 125, "max": 200, "unit": "mg/dL"}, "Triglycerides": {"min": 0, "max": 150, "unit": "mg/dL"}, "HDL Cholesterol": {"min": 40, "max": 60, "unit": "mg/dL"}, "LDL Cholesterol": {"min": 0, "max": 130, "unit": "mg/dL"}, "Creatinine": {"min": 0.7, "max": 1.3, "unit": "mg/dL"}, "Uric Acid": {"min": 3.5, "max": 7.2, "unit": "mg/dL"}, "TSH": {"min": 0.4, "max": 4.0, "unit": "µIU/mL"}, "Fasting Glucose": {"min": 70, "max": 100, "unit": "mg/dL"}, "HbA1c": {"min": 4.0, "max": 5.7, "unit": "%"}, "SGOT (AST)": {"min": 10, "max": 40, "unit": "U/L"}, "SGPT (ALT)": {"min": 10, "max": 40, "unit": "U/L"}}
+patterns = {"Hemoglobin": r"(?:Hb|Haemoglobin|Hemoglobin).*?(\d+\.?\d*)", "Glucose": r"(?:Glucose|Blood Sugar|Fasting).*?(\d+\.?\d*)", "WBC": r"(?:WBC|White Blood Cell).*?(\d+\.?\d*)", "Platelets": r"(?:Platelet|Thrombocyte).*?(\d+\.?\d*)", "Cholesterol": r"(?:Cholesterol|Total Cholesterol).*?(\d+\.?\d*)", "Creatinine": r"Creatinine.*?(\d+\.?\d*)", "TSH": r"TSH.*?(\d+\.?\d*)", "Uric Acid": r"Uric Acid.*?(\d+\.?\d*)", "SGOT": r"SGOT.*?(\d+\.?\d*)", "SGPT": r"SGPT.*?(\d+\.?\d*)"}
+health_tips = ["🥗 Eat a balanced diet", "💧 Drink 8 glasses of water", "🏃 Exercise 30 mins daily", "😴 Get 7-8 hours sleep"]
 
 def navigate_to(page_name):
     st.session_state.page = page_name
     st.rerun()
 
+# ---------- HELPER FUNCTIONS ----------
 def predict_diabetes_risk(patient_data, report_data):
-    if models["diabetes"] is None:
-        return None
+    if models["diabetes"] is None: return None
     try:
-        glucose = 100
-        for p in report_data:
-            if "Glucose" in p["Parameter"]:
-                glucose = p["Value"]
-                break
-        age = patient_data.get("age", 40)
-        bp_str = str(patient_data.get("bp", "120/80"))
-        bp = float(bp_str.split("/")[1]) if "/" in bp_str else 80
-        input_data = np.array([[0, glucose, bp, 20, 100, 25.0, 0.5, age]])
-        pred = models["diabetes"].predict(input_data)[0]
+        glucose = next((p["Value"] for p in report_data if "Glucose" in p["Parameter"]), 100)
+        bp = float(str(patient_data.get("bp", "120/80")).split("/")[1]) if "/" in str(patient_data.get("bp")) else 80
+        input_data = np.array([[0, glucose, bp, 20, 100, 25.0, 0.5, patient_data.get("age", 40)]])
         prob = models["diabetes"].predict_proba(input_data)[0]
-        return {"prediction": int(pred), "risk_percent": float(prob[1] * 100), "confidence": float(max(prob) * 100)}
-    except:
-        return None
+        return {"prediction": int(models["diabetes"].predict(input_data)[0]), "risk_percent": float(prob[1] * 100)}
+    except: return None
 
 def predict_heart_risk(patient_data, report_data):
-    if models["heart"] is None:
-        return None
+    if models["heart"] is None: return None
     try:
-        chol = 200
-        for p in report_data:
-            if "Cholesterol" in p["Parameter"]:
-                chol = p["Value"]
-                break
-        age = patient_data.get("age", 50)
-        gender = 1 if patient_data.get("gender", "Male") == "Male" else 0
-        bp_str = str(patient_data.get("bp", "120/80"))
-        bp = float(bp_str.split("/")[0]) if "/" in bp_str else 120
-        input_data = np.array([[age, gender, 1, bp, chol, 1, 150, 0, 1.5, 2, 0, 2, 3]])
-        pred = models["heart"].predict(input_data)[0]
+        chol = next((p["Value"] for p in report_data if "Cholesterol" in p["Parameter"]), 200)
+        bp = float(str(patient_data.get("bp", "120/80")).split("/")[0]) if "/" in str(patient_data.get("bp")) else 120
+        input_data = np.array([[patient_data.get("age", 50), 1 if patient_data.get("gender")=="Male" else 0, 1, bp, chol, 1, 150, 0, 1.5, 2, 0, 2, 3]])
         prob = models["heart"].predict_proba(input_data)[0]
-        return {"prediction": int(pred), "risk_percent": float(prob[1] * 100), "confidence": float(max(prob) * 100)}
-    except:
-        return None
+        return {"prediction": int(models["heart"].predict(input_data)[0]), "risk_percent": float(prob[1] * 100)}
+    except: return None
 
 def ai_chat_response(question, report_data=None, patient_data=None):
-    """AI Chatbot - login ke bina bhi kaam karega"""
-    if not GROQ_AVAILABLE or GROQ_API_KEY == "YOUR_GROQ_API_KEY_HERE":
-        return "⚠️ AI Chatbot setup nahi hua. Code mein Groq API key daalo."
-    
+    if not GROQ_AVAILABLE or not GROQ_API_KEY: return "⚠️ AI setup pending."
     try:
         client = Groq(api_key=GROQ_API_KEY)
-        
-        if report_data and patient_data:
-            report_summary = "\n".join([f"- {p['Parameter']}: {p['Value']} {p['Unit']} ({p['Status']})" for p in report_data])
-            context = f"""You are a helpful medical assistant for MediScan Pro.
-Patient: {patient_data.get('name')}, Age: {patient_data.get('age')}, Gender: {patient_data.get('gender')}
-Patient's Report: {report_summary}
-Patient's Conditions: {patient_data.get('conditions', 'None')}
-
-Answer any health question the patient asks. Use their report data if relevant.
-Rules: Simple patient-friendly language, no diagnosis, always recommend doctor, under 150 words."""
-        else:
-            context = """You are a helpful medical assistant for MediScan Pro.
-The user is a guest and can ask ANY general health question.
-Rules:
-- Simple, patient-friendly language
-- No diagnosis
-- Always recommend consulting a doctor for medical decisions
-- Under 150 words
-- Be empathetic and helpful
-- Answer general health, nutrition, exercise, mental health, first aid, etc."""
-        
-        response = client.chat.completions.create(
-            model="openai/gpt-oss-20b",
-            messages=[
-                {"role": "system", "content": context},
-                {"role": "user", "content": question}
-            ],
-            temperature=0.4,
-            max_tokens=400
-        )
+        context = "You are a helpful medical assistant. Answer simply. No diagnosis."
+        if report_data and patient_data: context += f"\nPatient: {patient_data.get('name')}. Report: {report_data}"
+        response = client.chat.completions.create(model="openai/gpt-oss-20b", messages=[{"role": "system", "content": context}, {"role": "user", "content": question}], max_tokens=300)
         return response.choices[0].message.content
-    except Exception as e:
-        return f"AI error: {str(e)}"
+    except: return "Error connecting to AI."
 
 # ---------- SIDEBAR ----------
 with st.sidebar:
-    st.markdown("""
-    <div style="text-align:center;padding:0.5rem 0;">
-        <h2 style="color: #e2e8f0; margin: 0;">🩺 MediScan Pro</h2>
-        <p style="color: #94a3b8; font-size: 0.8rem;">v5.0 • AI + Database</p>
-    </div>
-    """, unsafe_allow_html=True)
+    st.markdown("<h2 style='text-align:center; color: #e2e8f0;'>🩺 MediScan Pro</h2>", unsafe_allow_html=True)
     
+    lang_options = ["English", "Hindi"]
+    selected_lang = st.selectbox("🌐 Language / भाषा", lang_options, index=lang_options.index(st.session_state.language))
+    if selected_lang != st.session_state.language:
+        st.session_state.language = selected_lang
+        st.rerun()
+        
     st.divider()
-    
-    if st.session_state.logged_in_patient:
-        st.success(f"👤 Patient: {st.session_state.logged_in_patient['name']}")
-    if st.session_state.logged_in_doctor:
-        st.success(f"👨‍⚕️ Doctor: {st.session_state.logged_in_doctor['name']}")
+    if st.session_state.logged_in_patient: st.success(f"👤 {st.session_state.logged_in_patient['name']}")
+    if st.session_state.logged_in_doctor: st.success(f"👨‍⚕️ {st.session_state.logged_in_doctor['name']}")
     
     nav_items = []
-    
-    if st.session_state.logged_in_doctor:
-        nav_items = [
-            ("🏠 Home", "🏠 Home"),
-            ("🩺 Doctor Dashboard", "🩺 Doctor Dashboard"),
-            ("🚪 Logout", "🚪 Logout"),
-        ]
-    elif st.session_state.logged_in_patient:
-        nav_items = [
-            ("🏠 Home", "🏠 Home"),
-            ("📤 Upload Report", "📤 Upload Report"),
-            ("🎫 My Token", "🎫 My Token"),
-            ("💊 My Prescriptions", "💊 My Prescriptions"),
-            ("💬 AI Chatbot", "💬 AI Chatbot"),
-            ("📜 My Reports", "📜 My Reports"),
-            ("🚪 Logout", "🚪 Logout"),
-        ]
-    else:
-      nav_items = [
-        ("🏠 Home", "🏠 Home"),
-        ("💬 AI Chatbot", "💬 AI Chatbot"),
-        ("👤 Patient Register", "👤 Patient Register"),
-        ("🔐 Patient Login", "🔐 Patient Login"),
-        ("👨‍⚕️ Doctor Login", "👨‍⚕️ Doctor Login"),
-        ("💡 Health Tips", "💡 Health Tips"),
-        ("ℹ️ About", "ℹ️ About"),
-    ]
+    if st.session_state.logged_in_doctor: 
+        nav_items = [(T["home"], "🏠 Home"), (T["doc_dash"], "🩺 Doctor Dashboard"), (T["about"], "ℹ️ About"), (T["logout"], "🚪 Logout")]
+    elif st.session_state.logged_in_patient: 
+        nav_items = [(T["home"], "🏠 Home"), (T["upload_pdf"], "📤 Upload Report"), ("🎫 My Token", "🎫 My Token"), ("💊 My Prescriptions", "💊 My Prescriptions"), (T["chatbot"], "💬 AI Chatbot"), (T["about"], "ℹ️ About"), (T["logout"], "🚪 Logout")]
+    else: 
+        nav_items = [(T["home"], "🏠 Home"), (T["chatbot"], "💬 AI Chatbot"), (T["patient_reg"], "👤 Patient Register"), (T["patient_login"], "🔐 Patient Login"), (T["doc_login"], "👨‍⚕️ Doctor Login"), (T["about"], "ℹ️ About")]
     
     for label, target in nav_items:
         if st.button(label, use_container_width=True, key=f"nav_{target}"):
@@ -482,626 +203,317 @@ with st.sidebar:
                 st.session_state.logged_in_patient = None
                 st.session_state.logged_in_doctor = None
                 navigate_to("🏠 Home")
-            else:
-                navigate_to(target)
-    
-    st.divider()
-    st.markdown("### 🤖 AI Status")
-    st.markdown(f"{'✅' if models['diabetes'] else '❌'} Diabetes Model")
-    st.markdown(f"{'✅' if models['heart'] else '❌'} Heart Model")
-    st.markdown(f"{'✅' if GROQ_AVAILABLE and GROQ_API_KEY != 'YOUR_GROQ_API_KEY_HERE' else '❌'} AI Chatbot")
+            else: navigate_to(target)
 
-# ---------- MAIN ----------
-st.markdown('<h1 class="main-title">🩺 MediScan Pro</h1>', unsafe_allow_html=True)
-st.markdown('<p class="subtitle">AI-Powered Patient Case-Taking System</p>', unsafe_allow_html=True)
-
-random_tip = random.choice(health_tips)
-st.markdown(f'<div class="health-tip">💡 <b>Health Tip:</b> {random_tip}</div>', unsafe_allow_html=True)
-
+# ---------- MAIN UI ----------
 page = st.session_state.page
 
 # ============================================================
-# PAGE: HOME
+# PAGE: HOME (3D Visualisation)
 # ============================================================
 if page == "🏠 Home":
-    st.markdown('<div class="ios-card">', unsafe_allow_html=True)
+    st.markdown('<h1 class="main-title">🩺 MediScan Pro</h1>', unsafe_allow_html=True)
+    st.markdown(f'<p class="subtitle">{T["sys_title"]}</p>', unsafe_allow_html=True)
+    st.markdown(f'<div class="health-tip">💡 <b>Health Tip:</b> {random.choice(health_tips)}</div><br>', unsafe_allow_html=True)
     
-    col1, col2, col3, col4 = st.columns(4)
-    patients = db.get_all_patients()
-    with col1:
-        st.markdown(f'<div class="metric-card purple"><p>👥</p><h3>{len(patients)}</h3><p>Patients</p></div>', unsafe_allow_html=True)
-    with col2:
-        st.markdown('<div class="metric-card green"><p>🤖</p><h3>2</h3><p>AI Models</p></div>', unsafe_allow_html=True)
-    with col3:
-        st.markdown('<div class="metric-card cyan"><p>👨‍⚕️</p><h3>8</h3><p>Doctors</p></div>', unsafe_allow_html=True)
-    with col4:
-        st.markdown('<div class="metric-card orange"><p>💾</p><h3>DB</h3><p>Saved</p></div>', unsafe_allow_html=True)
+    c1, c2, c3 = st.columns(3)
+    with c1: st.markdown('<div class="card-3d"><p>👥</p><h3>Live</h3><p>Active Patients</p></div>', unsafe_allow_html=True)
+    with c2: st.markdown('<div class="card-3d"><p>🤖</p><h3>2</h3><p>ML Risk Models</p></div>', unsafe_allow_html=True)
+    with c3: st.markdown('<div class="card-3d"><p>👨‍⚕️</p><h3>8</h3><p>Specialist Doctors</p></div>', unsafe_allow_html=True)
+
+    st.markdown("<br><hr style='border-color: rgba(255,255,255,0.05);'><br>", unsafe_allow_html=True)
+
+    col_organs, col_action = st.columns([2, 1])
     
-    st.markdown("---")
-    st.markdown("### 🎯 Quick Actions")
-    
-    if not st.session_state.logged_in_patient and not st.session_state.logged_in_doctor:
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            st.markdown('<div class="metric-card purple"><p style="font-size:2rem;">👤</p><h3>Register</h3><p>New Patient</p></div>', unsafe_allow_html=True)
-            if st.button("👤 Register Patient →", use_container_width=True, key="home_reg"):
-                navigate_to("👤 Patient Register")
-        with col2:
-            st.markdown('<div class="metric-card green"><p style="font-size:2rem;">🔐</p><h3>Login</h3><p>Existing Patient</p></div>', unsafe_allow_html=True)
-            if st.button("🔐 Patient Login →", use_container_width=True, key="home_pl"):
-                navigate_to("🔐 Patient Login")
-        with col3:
-            st.markdown('<div class="metric-card cyan"><p style="font-size:2rem;">👨‍⚕️</p><h3>Doctor</h3><p>Login</p></div>', unsafe_allow_html=True)
-            if st.button("👨‍⚕️ Doctor Login →", use_container_width=True, key="home_dl"):
-                navigate_to("👨‍⚕️ Doctor Login")
-    else:
-        st.info("👈 Sidebar se navigate karo")
-    
-    st.markdown('</div>', unsafe_allow_html=True)
+    with col_organs:
+        st.markdown("### 🫀 Internal Organ Health Insights")
+        st.caption("AI-powered real-time analysis of vital organs")
+        
+        # Heart Card
+        st.markdown("""
+        <div style="background: linear-gradient(135deg, rgba(248, 113, 113, 0.1), rgba(239, 68, 68, 0.05)); border-radius: 20px; padding: 1.5rem; margin-bottom: 15px; border-left: 5px solid #f87171; box-shadow: 0 10px 30px rgba(248, 113, 113, 0.1); transition: all 0.3s ease;">
+            <div style="display: flex; align-items: center;">
+                <div style="font-size: 3.5rem; margin-right: 20px; filter: drop-shadow(0px 10px 10px rgba(248,113,113,0.5));">❤️</div>
+                <div>
+                    <h4 style="margin: 0; color: #f87171;">Cardiovascular System (Heart)</h4>
+                    <ul style="margin-top: 10px; color: #cbd5e1; font-size: 0.95rem; padding-left: 15px;">
+                        <li><b>Risk Prediction:</b> AI screens for Heart Disease risk using XGBoost model based on Cholesterol & BP.</li>
+                        <li><b>Vitals Tracking:</b> Monitors blood pressure and pulse rate to detect early signs of hypertension.</li>
+                    </ul>
+                </div>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+        # Lungs/Brain Card
+        st.markdown("""
+        <div style="background: linear-gradient(135deg, rgba(251, 191, 36, 0.1), rgba(245, 158, 11, 0.05)); border-radius: 20px; padding: 1.5rem; margin-bottom: 15px; border-left: 5px solid #fbbf24; box-shadow: 0 10px 30px rgba(251, 191, 36, 0.1); transition: all 0.3s ease;">
+            <div style="display: flex; align-items: center;">
+                <div style="font-size: 3.5rem; margin-right: 20px; filter: drop-shadow(0px 10px 10px rgba(251,191,36,0.5));">🧠</div>
+                <div>
+                    <h4 style="margin: 0; color: #fbbf24;">Neurological System (Brain)</h4>
+                    <ul style="margin-top: 10px; color: #cbd5e1; font-size: 0.95rem; padding-left: 15px;">
+                        <li><b>Symptom Triage:</b> AI Triage routes headaches, dizziness, and memory loss to Neurologists.</li>
+                        <li><b>Red Flag Detection:</b> Instantly alerts doctors for emergency symptoms like paralysis or seizures.</li>
+                    </ul>
+                </div>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+        # Kidney Card
+        st.markdown("""
+        <div style="background: linear-gradient(135deg, rgba(34, 211, 238, 0.1), rgba(6, 182, 212, 0.05)); border-radius: 20px; padding: 1.5rem; margin-bottom: 15px; border-left: 5px solid #22d3ee; box-shadow: 0 10px 30px rgba(34, 211, 238, 0.1); transition: all 0.3s ease;">
+            <div style="display: flex; align-items: center;">
+                <div style="font-size: 3.5rem; margin-right: 20px; filter: drop-shadow(0px 10px 10px rgba(34,211,238,0.5));">🫘</div>
+                <div>
+                    <h4 style="margin: 0; color: #22d3ee;">Renal System (Kidneys)</h4>
+                    <ul style="margin-top: 10px; color: #cbd5e1; font-size: 0.95rem; padding-left: 15px;">
+                        <li><b>Filtration Rate:</b> Monitors Blood Urea and Creatinine to assess kidney function.</li>
+                        <li><b>Electrolyte Balance:</b> Tracks Sodium and Potassium levels, crucial for nerve and muscle function.</li>
+                    </ul>
+                </div>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    with col_action:
+        st.markdown("### ⚡ Quick Actions")
+        st.write("Get started with MediScan Pro")
+        st.write("")
+        if not st.session_state.logged_in_patient and not st.session_state.logged_in_doctor:
+            if st.button(T["patient_reg"], use_container_width=True): navigate_to("👤 Patient Register")
+            st.write("")
+            if st.button(T["patient_login"], use_container_width=True): navigate_to("🔐 Patient Login")
+            st.write("")
+            if st.button(T["doc_login"], use_container_width=True): navigate_to("👨‍⚕️ Doctor Login")
+        else:
+            st.success("✅ You are logged in.")
+            if st.button("Go to Dashboard", use_container_width=True):
+                if st.session_state.logged_in_doctor: navigate_to("🩺 Doctor Dashboard")
+                else: navigate_to("📤 Upload Report")
 
 # ============================================================
-# PAGE: PATIENT REGISTER
+# PAGE: PATIENT REGISTER (Voice + Ayurveda)
 # ============================================================
 elif page == "👤 Patient Register":
     st.markdown('<div class="ios-card">', unsafe_allow_html=True)
-    st.subheader("👤 New Patient Registration")
-    
     with st.form("register"):
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            name = st.text_input("👤 Full Name*")
-            age = st.number_input("📅 Age*", 0, 120, 30)
-        with col2:
-            gender = st.selectbox("⚧️ Gender", ["Male", "Female", "Other"])
-            phone = st.text_input("📞 Phone*")
-        with col3:
-            blood_group = st.selectbox("🩸 Blood Group", ["", "A+", "A-", "B+", "B-", "O+", "O-", "AB+", "AB-"])
-            email = st.text_input("📧 Email")
+        c1, c2, c3 = st.columns(3)
+        with c1: name = st.text_input(T["name"]); age = st.number_input(T["age"], 0, 120, 30)
+        with c2: gender = st.selectbox(T["gender"], ["Male", "Female", "Other"]); phone = st.text_input(T["phone"])
+        with c3: blood_group = st.selectbox(T["blood"], ["", "A+", "B+", "O+", "AB+"]); email = st.text_input("📧 Email")
         
-        st.divider()
         st.markdown("### 🔐 Login Credentials")
-        col1, col2 = st.columns(2)
-        with col1:
-            username = st.text_input("Username*", placeholder="Unique username")
-        with col2:
-            password = st.text_input("Password*", type="password")
+        c1, c2 = st.columns(2)
+        with c1: username = st.text_input(T["user"])
+        with c2: password = st.text_input(T["pass"], type="password")
         
-        st.divider()
-        col1, col2 = st.columns(2)
-        with col1:
-            conditions = st.multiselect("Known Conditions",
-                ["Diabetes", "Hypertension", "Heart Disease", "Asthma", "Thyroid", "Kidney Disease", "None"])
-        with col2:
-            allergies = st.multiselect("Allergies",
-                ["Penicillin", "Sulfa", "Aspirin", "Latex", "Food - Nuts", "Food - Dairy", "None"])
-        
-        chief_complaint = st.text_area("📌 Chief Complaint*", height=80)
-        
-        st.subheader("🤒 Symptoms")
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            fever = st.checkbox("Fever")
-            headache = st.checkbox("Headache")
-        with col2:
-            cough = st.checkbox("Cough")
-            fatigue = st.checkbox("Fatigue")
-        with col3:
-            pain = st.checkbox("Pain")
-            breath = st.checkbox("Shortness of Breath")
-        
-        symptoms = [s for s, v in {"Fever": fever, "Headache": headache, "Cough": cough,
-                                    "Fatigue": fatigue, "Pain": pain, "Shortness of Breath": breath}.items() if v]
-        
-        st.subheader("📊 Vitals")
-        col1, col2, col3, col4 = st.columns(4)
-        with col1:
-            bp_sys = st.number_input("BP Sys", 0, 300, 120)
-        with col2:
-            bp_dia = st.number_input("BP Dia", 0, 200, 80)
-        with col3:
-            pulse = st.number_input("Pulse", 0, 300, 72)
-        with col4:
-            temp = st.number_input("Temp °F", 0.0, 110.0, 98.6)
-        
-        submitted = st.form_submit_button("💾 Register Patient")
-        
-        if submitted:
-            if not name or not chief_complaint or not username or not password:
-                st.error("⚠️ Name, Chief Complaint, Username, Password required!")
+        st.markdown(f"### 📌 {T['complaint']}")
+        if VOICE_AVAILABLE:
+            st.info("Aap bolkar bhi apni problem bata sakte hain:")
+            voice_text = speech_to_text(language='en', start_prompt="🎤 Record Complaint", stop_prompt="🛑 Stop", just_once=True, key='voice_comp')
+            if voice_text:
+                st.success(f"Recorded: {voice_text}")
+                chief_complaint = st.text_area("Details", value=voice_text)
             else:
-                if db.get_patient_by_username(username):
-                    st.error("❌ Username already exists!")
-                else:
-                    red_flags = ai_triage.check_red_flags(chief_complaint + " " + " ".join(symptoms))
-                    
-                    patient_data = {
-                        "name": name, "age": age, "gender": gender, "phone": phone,
-                        "email": email, "blood_group": blood_group,
-                        "conditions": ", ".join(conditions) if conditions else "None",
-                        "allergies": ", ".join(allergies) if allergies else "None",
-                        "chief_complaint": chief_complaint,
-                        "symptoms": ", ".join(symptoms) if symptoms else "None",
-                        "bp": f"{bp_sys}/{bp_dia}", "pulse": pulse, "temperature": temp,
-                        "red_flags": red_flags,
-                        "username": username, "password": password
-                    }
-                    
-                    patient_id = db.save_patient(patient_data)
-                    
-                    try:
-                        sms_service.send_sms(patient_id, phone, f"Welcome {name}! Aapka MediScan Pro account ban gaya hai. Username: {username}")
-                    except: pass
-                    
-                    st.success(f"✅ Patient registered! ID: {patient_id}")
-                    st.info(f"📌 Username: **{username}** — Ab login karo!")
-                    st.balloons()
-    
+                chief_complaint = st.text_area("Details")
+        else:
+            chief_complaint = st.text_area("Details", height=80)
+
+        st.markdown(f"### {T['ayush']}")
+        c1, c2, c3 = st.columns(3)
+        with c1: prakriti = st.selectbox(T["prakriti"], ["Unknown", "Vata", "Pitta", "Kapha", "Mixed"])
+        with c2: agni = st.selectbox(T["agni"], ["Unknown", "Samagni", "Vishamagni", "Tikshnagni", "Mandagni"])
+        with c3: koshtha = st.selectbox(T["koshtha"], ["Unknown", "Krura", "Madhya", "Mridu"])
+        ayurveda_dict = {"prakriti": prakriti, "agni": agni, "koshtha": koshtha}
+        
+        st.subheader(f"📊 {T['vitals']}")
+        c1, c2, c3, c4 = st.columns(4)
+        with c1: bp_sys = st.number_input("BP Sys", 0, 300, 120)
+        with c2: bp_dia = st.number_input("BP Dia", 0, 200, 80)
+        with c3: pulse = st.number_input("Pulse", 0, 300, 72)
+        with c4: temp = st.number_input("Temp °F", 0.0, 110.0, 98.6)
+        
+        if st.form_submit_button(T["register_btn"]):
+            if not name or not chief_complaint or not username or not password: st.error("⚠️ Required fields missing!")
+            elif db.get_patient_by_username(username): st.error("❌ Username exists!")
+            else:
+                p_data = {"name": name, "age": age, "gender": gender, "phone": phone, "email": email, "blood_group": blood_group, "conditions": "None", "allergies": "None", "chief_complaint": chief_complaint, "symptoms": "None", "bp": f"{bp_sys}/{bp_dia}", "pulse": pulse, "temperature": temp, "red_flags": [], "username": username, "password": security.hash_password(password), "ayurveda_data": json.dumps(ayurveda_dict)}
+                db.save_patient(p_data)
+                st.success(f"✅ Registered Successfully!")
     st.markdown('</div>', unsafe_allow_html=True)
 
 # ============================================================
-# PAGE: PATIENT LOGIN
+# PAGE: LOGINS
 # ============================================================
 elif page == "🔐 Patient Login":
     st.markdown('<div class="ios-card">', unsafe_allow_html=True)
-    st.subheader("🔐 Patient Login")
-    
-    col1, col2, col3 = st.columns([1, 2, 1])
-    with col2:
-        with st.form("patient_login"):
-            username = st.text_input("Username")
-            password = st.text_input("Password", type="password")
-            submitted = st.form_submit_button("🔐 Login", use_container_width=True)
-            
-            if submitted:
-                patient = db.get_patient_by_username(username)
-                if patient and patient['password'] == password:
-                    st.session_state.logged_in_patient = patient
-                    st.success(f"✅ Welcome {patient['name']}!")
-                    st.balloons()
-                    navigate_to("📤 Upload Report")
-                else:
-                    st.error("❌ Invalid username or password!")
-    
+    with st.form("p_login"):
+        u = st.text_input(T["user"]); p = st.text_input(T["pass"], type="password")
+        if st.form_submit_button(T["login_btn"]):
+            pat = db.get_patient_by_username(u)
+            if pat and security.verify_password(pat['password'], p):
+                st.session_state.logged_in_patient = pat
+                navigate_to("📤 Upload Report")
+            else: st.error("❌ Invalid credentials")
     st.markdown('</div>', unsafe_allow_html=True)
 
-# ============================================================
-# PAGE: DOCTOR LOGIN
-# ============================================================
 elif page == "👨‍⚕️ Doctor Login":
     st.markdown('<div class="ios-card">', unsafe_allow_html=True)
-    st.subheader("👨‍⚕️ Doctor Login")
-    
-    st.info("**Demo Login Credentials:**")
-    st.code("""
-Username: dr.sharma   Password: doctor123
-Username: dr.verma    Password: doctor123
-Username: dr.gupta    Password: doctor123
-Username: dr.singh    Password: doctor123
-    """)
-    
-    col1, col2, col3 = st.columns([1, 2, 1])
-    with col2:
-        with st.form("doctor_login"):
-            username = st.text_input("Username")
-            password = st.text_input("Password", type="password")
-            submitted = st.form_submit_button("🔐 Login", use_container_width=True)
-            
-            if submitted:
-                doctor = db.get_doctor_by_username(username)
-                if doctor and doctor['password'] == password:
-                    st.session_state.logged_in_doctor = doctor
-                    st.success(f"✅ Welcome {doctor['name']}!")
-                    st.balloons()
-                    navigate_to("🩺 Doctor Dashboard")
-                else:
-                    st.error("❌ Invalid username or password!")
-    
+    st.info("Demo: `dr.sharma` / `doctor123`")
+    with st.form("d_login"):
+        u = st.text_input(T["user"]); p = st.text_input(T["pass"], type="password")
+        if st.form_submit_button(T["login_btn"]):
+            doc = db.get_doctor_by_username(u)
+            if doc and security.verify_password(doc['password'], p):
+                st.session_state.logged_in_doctor = doc
+                navigate_to("🩺 Doctor Dashboard")
+            else: st.error("❌ Invalid credentials")
     st.markdown('</div>', unsafe_allow_html=True)
 
 # ============================================================
 # PAGE: UPLOAD REPORT
 # ============================================================
 elif page == "📤 Upload Report":
-    if not st.session_state.logged_in_patient:
-        st.warning("⚠️ Pehle login karo!")
-        if st.button("🔐 Login"):
-            navigate_to("🔐 Patient Login")
+    pat = st.session_state.logged_in_patient
+    if not pat: st.warning("⚠️ Login required")
     else:
-        patient = st.session_state.logged_in_patient
         st.markdown('<div class="ios-card">', unsafe_allow_html=True)
-        st.subheader(f"📤 Upload Report for {patient['name']}")
-        
-        uploaded_file = st.file_uploader("Choose PDF", type=["pdf"])
-        
-        if uploaded_file:
-            with st.spinner("🔍 Extracting..."):
-                doc = fitz.open(stream=uploaded_file.read(), filetype="pdf")
+        up_file = st.file_uploader(T["upload_pdf"], type=["pdf"])
+        if up_file:
+            file_bytes = up_file.read()
+            b64_pdf = base64.b64encode(file_bytes).decode('utf-8')
+            with st.spinner(T["analyzing"]):
+                doc = fitz.open(stream=file_bytes, filetype="pdf")
                 text = "".join([p.get_text() for p in doc])
-            
-            found_params = []
-            for param, pattern in patterns.items():
-                match = re.search(pattern, text, re.IGNORECASE)
-                if match:
-                    value = float(match.group(1))
-                    range_info = reference_ranges.get(param, {})
-                    if range_info:
-                        min_val = range_info.get("min", 0)
-                        max_val = range_info.get("max", 0)
-                        unit = range_info.get("unit", "N/A")
-                        category = range_info.get("category", "General")
-                        if value < min_val: status = "🔴 LOW"
-                        elif value > max_val: status = "🔴 HIGH"
-                        else: status = "🟢 NORMAL"
-                    else:
-                        status, unit, category = "⚠️ CHECK", "N/A", "General"
-                    
-                    found_params.append({
-                        "Parameter": param, "Value": value, "Unit": unit,
-                        "Category": category, "Status": status
-                    })
-            
-            st.session_state.current_results = found_params
-            
-            if found_params:
-                st.success("✅ Report analyzed!")
-                df = pd.DataFrame(found_params)
-                st.dataframe(df, use_container_width=True, hide_index=True)
+                found_params = []
+                for param, pattern in patterns.items():
+                    match = re.search(pattern, text, re.IGNORECASE)
+                    if match:
+                        val = float(match.group(1))
+                        r_info = reference_ranges.get(param, {})
+                        st_val = "🔴 LOW" if val < r_info.get("min", 0) else ("🔴 HIGH" if val > r_info.get("max", 0) else "🟢 NORMAL")
+                        found_params.append({"Parameter": param, "Value": val, "Unit": r_info.get("unit", "N/A"), "Status": st_val})
                 
-                try:
-                    db.save_report(patient['patient_id'], uploaded_file.name, found_params)
-                except: pass
-                
-                st.markdown("---")
-                st.markdown("### 🤖 AI Risk Screening")
-                col1, col2 = st.columns(2)
-                
-                with col1:
-                    diab = predict_diabetes_risk(patient, found_params)
-                    if diab:
-                        color = "red" if diab['prediction'] == 1 else "green"
-                        st.markdown(f'<div class="metric-card {color}"><p>🩸 Diabetes Risk</p><h3>{diab["risk_percent"]:.1f}%</h3><p>{"⚠️ HIGH" if diab["prediction"] == 1 else "✅ LOW"}</p></div>', unsafe_allow_html=True)
-                    else:
-                        st.info("🩸 Diabetes model load nahi hua")
-                
-                with col2:
-                    heart = predict_heart_risk(patient, found_params)
-                    if heart:
-                        color = "red" if heart['prediction'] == 1 else "green"
-                        st.markdown(f'<div class="metric-card {color}"><p>❤️ Heart Risk</p><h3>{heart["risk_percent"]:.1f}%</h3><p>{"⚠️ HIGH" if heart["prediction"] == 1 else "✅ LOW"}</p></div>', unsafe_allow_html=True)
-                    else:
-                        st.info("❤️ Heart model load nahi hua")
-                
-                st.markdown("---")
-                st.markdown("### 🩺 AI Specialist Assignment")
-                
-                triage = ai_triage.triage_patient(
-                    patient.get('symptoms', ''),
-                    patient.get('age', 30),
-                    patient.get('gender', 'Male'),
-                    patient.get('chief_complaint', '')
-                )
-                
-                st.markdown(f"""
-                <div class="doctor-card">
-                    <h3>👨‍⚕️ Recommended: {triage['specialist']}</h3>
-                    <p>Confidence: {triage['confidence']}%</p>
-                    <p>Urgency: {triage['urgency']}</p>
-                </div>
-                """, unsafe_allow_html=True)
-                
-                if triage['red_flags']:
-                    st.error(f"🚨 RED FLAGS: {', '.join(triage['red_flags'])}")
-                
-                st.markdown("---")
-                if st.button("📅 Book Appointment", use_container_width=True):
-                    doctors = db.get_doctors_by_specialist(triage['specialist'])
-                    if not doctors:
-                        doctors = db.get_doctors_by_specialist("General Physician")
-                    
-                    if doctors:
-                        doctor = doctors[0]
-                        slot_time = datetime.now().strftime("%I:%M %p")
-                        
-                        appt_id, token = db.create_appointment(
-                            patient['patient_id'], doctor['doctor_id'],
-                            triage['specialist'], slot_time
-                        )
-                        
-                        try:
-                            sms_service.send_appointment_confirmation(
-                                patient['patient_id'], patient['phone'],
-                                patient['name'], doctor['name'],
-                                triage['specialist'], token, slot_time,
-                                datetime.now().strftime("%d/%m/%Y")
-                            )
-                        except: pass
-                        
-                        st.success(f"✅ Appointment booked! Token: {token}")
-                        st.balloons()
-                    else:
-                        st.error("❌ No doctors available!")
-                
-                st.markdown(get_download_link(df), unsafe_allow_html=True)
-            else:
-                st.warning("No parameters detected.")
-        
-        st.markdown('</div>', unsafe_allow_html=True)
-
-# ============================================================
-# PAGE: MY TOKEN
-# ============================================================
-elif page == "🎫 My Token":
-    if not st.session_state.logged_in_patient:
-        st.warning("⚠️ Pehle login karo!")
-    else:
-        patient = st.session_state.logged_in_patient
-        st.markdown('<div class="ios-card">', unsafe_allow_html=True)
-        st.subheader("🎫 My Appointments")
-        
-        appointments = db.get_appointments_by_patient(patient['patient_id'])
-        
-        if not appointments:
-            st.info("📭 No appointments booked yet. Upload a report first!")
-        else:
-            for appt in appointments:
-                st.markdown(f"""
-                <div class="token-card">
-                    <p>Token Number</p>
-                    <h1>{appt['token_number']}</h1>
-                    <p>👨‍⚕️ {appt['doctor_name']} ({appt['doctor_specialist']})</p>
-                    <p>⏰ {appt['slot_time']} • 📅 {appt['appointment_date']}</p>
-                    <p>Status: {appt['status']}</p>
-                </div>
-                """, unsafe_allow_html=True)
-                
-                wait = ai_triage.estimate_wait_time(appt['token_number'])
-                st.info(f"⏳ Estimated Wait Time: **{wait}**")
-                st.markdown("---")
-        
+                if found_params:
+                    st.dataframe(pd.DataFrame(found_params), use_container_width=True)
+                    db.save_report(pat['patient_id'], up_file.name, found_params, file_data=b64_pdf)
+                    st.success("Report Saved!")
         st.markdown('</div>', unsafe_allow_html=True)
 
 # ============================================================
 # PAGE: MY PRESCRIPTIONS
 # ============================================================
 elif page == "💊 My Prescriptions":
-    if not st.session_state.logged_in_patient:
-        st.warning("⚠️ Pehle login karo!")
+    if not st.session_state.logged_in_patient: st.warning("⚠️ Login required")
     else:
-        patient = st.session_state.logged_in_patient
         st.markdown('<div class="ios-card">', unsafe_allow_html=True)
-        st.subheader("💊 My Prescriptions")
-        
-        prescriptions = db.get_prescriptions_by_patient(patient['patient_id'])
-        
-        if not prescriptions:
-            st.info("📭 No prescriptions yet.")
+        prescs = db.get_prescriptions_by_patient(st.session_state.logged_in_patient['patient_id'])
+        if not prescs: st.info("No prescriptions yet.")
         else:
-            for presc in prescriptions:
-                st.markdown(f"""
-                <div class="patient-info">
-                    <h3>💊 Prescription #{presc['prescription_id']}</h3>
-                    <p><b>Doctor:</b> {presc['doctor_name']}</p>
-                    <p><b>Date:</b> {presc['created_at']}</p>
-                    <p><b>Diagnosis:</b> {presc['diagnosis']}</p>
-                    <p><b>Medicines:</b> {presc['medicines']}</p>
-                    <p><b>Advice:</b> {presc['advice']}</p>
-                    <p><b>Follow-up:</b> {presc['follow_up_date']}</p>
-                </div>
-                """, unsafe_allow_html=True)
-        
-        st.markdown('</div>', unsafe_allow_html=True)
-
-# ============================================================
-# PAGE: AI CHATBOT
-# ============================================================
-# ============================================================
-# PAGE: AI CHATBOT
-# ============================================================
-elif page == "💬 AI Chatbot":
-    st.markdown('<div class="ios-card">', unsafe_allow_html=True)
-    st.subheader("💬 AI Health Assistant")
-    
-    if st.session_state.logged_in_patient:
-        st.success(f"👤 Logged in as: {st.session_state.logged_in_patient['name']}")
-        st.caption("Report + general health questions — dono pooch sakte ho!")
-    else:
-        st.info("👋 Welcome! Koi bhi health sawaal pooch sakte ho.")
-        st.caption("💡 Report-specific answers ke liye patient login karo.")
-    
-    st.markdown("**Quick Questions:**")
-    col1, col2, col3, col4 = st.columns(4)
-    quick_q = None
-    with col1:
-        if st.button("💧 Paani", use_container_width=True):
-            quick_q = "Din mein kitna paani peena chahiye?"
-    with col2:
-        if st.button("😴 Neend", use_container_width=True):
-            quick_q = "Healthy neend ke liye tips batao"
-    with col3:
-        if st.button("🏃 Exercise", use_container_width=True):
-            quick_q = "Roz kitna exercise karna chahiye?"
-    with col4:
-        if st.button("🥗 Diet", use_container_width=True):
-            quick_q = "Healthy diet kya hoti hai?"
-    
-    if 'chat_history' not in st.session_state:
-        st.session_state.chat_history = []
-    
-    for chat in st.session_state.chat_history:
-        with st.chat_message("user"):
-            st.write(chat["q"])
-        with st.chat_message("assistant"):
-            st.write(chat["a"])
-    
-    user_q = st.chat_input("Kuch bhi poocho...")
-    final_q = quick_q or user_q
-    
-    if final_q:
-        with st.chat_message("user"):
-            st.write(final_q)
-        with st.chat_message("assistant"):
-            with st.spinner("🤔..."):
-                if st.session_state.logged_in_patient:
-                    patient = st.session_state.logged_in_patient
-                    reports = db.get_patient_reports(patient['patient_id'])
-                    report_data = reports[0]['parameters'] if reports else []
-                    answer = ai_chat_response(final_q, report_data, patient)
-                else:
-                    answer = ai_chat_response(final_q)
-                st.write(answer)
-        st.session_state.chat_history.append({"q": final_q, "a": answer})
-    
-    st.markdown('</div>', unsafe_allow_html=True)
-# ============================================================
-# PAGE: MY REPORTS
-# ============================================================
-elif page == "📜 My Reports":
-    if not st.session_state.logged_in_patient:
-        st.warning("⚠️ Pehle login karo!")
-    else:
-        patient = st.session_state.logged_in_patient
-        st.markdown('<div class="ios-card">', unsafe_allow_html=True)
-        st.subheader("📜 My Reports")
-        
-        reports = db.get_patient_reports(patient['patient_id'])
-        
-        if not reports:
-            st.info("📭 No reports yet.")
-        else:
-            for r in reports:
-                with st.expander(f"📄 {r['filename']} — {r['uploaded_at']}"):
-                    df = pd.DataFrame(r['parameters'])
-                    st.dataframe(df, use_container_width=True, hide_index=True)
-        
+            for p in prescs:
+                st.markdown(f'<div class="patient-info"><h3>💊 {p["diagnosis"]}</h3><p><b>Medicines:</b> {p["medicines"]}</p><p><b>Advice:</b> {p["advice"]}</p></div>', unsafe_allow_html=True)
+                
+                pdf = FPDF()
+                pdf.add_page()
+                pdf.set_font("Arial", size=16, style='B')
+                pdf.cell(200, 10, txt="MediScan Pro - e-Prescription", ln=True, align='C')
+                pdf.set_font("Arial", size=12)
+                pdf.ln(10)
+                pdf.cell(200, 10, txt=f"Patient Name: {st.session_state.logged_in_patient['name']}", ln=True)
+                pdf.cell(200, 10, txt=f"Diagnosis: {p['diagnosis']}", ln=True)
+                pdf.cell(200, 10, txt=f"Medicines: {p['medicines']}", ln=True)
+                pdf.cell(200, 10, txt=f"Advice: {p['advice']}", ln=True)
+                pdf.ln(20)
+                pdf.cell(200, 10, txt="Doctor's Signature: ___________________", ln=True, align='R')
+                
+                pdf_bytes = pdf.output(dest='S').encode('latin-1')
+                st.download_button(label=T["download_pdf"], data=pdf_bytes, file_name=f"Prescription_{p['prescription_id']}.pdf", mime="application/pdf")
+                st.markdown("---")
         st.markdown('</div>', unsafe_allow_html=True)
 
 # ============================================================
 # PAGE: DOCTOR DASHBOARD
 # ============================================================
 elif page == "🩺 Doctor Dashboard":
-    if not st.session_state.logged_in_doctor:
-        st.warning("⚠️ Pehle doctor login karo!")
+    doc = st.session_state.logged_in_doctor
+    if not doc: st.warning("⚠️ Login required")
     else:
-        doctor = st.session_state.logged_in_doctor
         st.markdown('<div class="ios-card">', unsafe_allow_html=True)
-        st.subheader(f"🩺 Welcome {doctor['name']}")
-        st.caption(f"{doctor['specialist']} • {doctor['qualification']}")
+        st.subheader(f"🩺 Welcome {doc['name']}")
+        appts = db.get_appointments_by_doctor(doc['doctor_id'])
         
-        appointments = db.get_appointments_by_doctor(doctor['doctor_id'])
-        
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            st.markdown(f'<div class="metric-card purple"><p>📅 Today</p><h3>{len(appointments)}</h3></div>', unsafe_allow_html=True)
-        with col2:
-            waiting = sum(1 for a in appointments if a['status'] == 'Waiting')
-            st.markdown(f'<div class="metric-card orange"><p>⏳ Waiting</p><h3>{waiting}</h3></div>', unsafe_allow_html=True)
-        with col3:
-            done = sum(1 for a in appointments if a['status'] == 'Completed')
-            st.markdown(f'<div class="metric-card green"><p>✅ Done</p><h3>{done}</h3></div>', unsafe_allow_html=True)
-        
-        st.markdown("---")
-        st.markdown("### 📋 Today's Patients")
-        
-        if not appointments:
-            st.info("📭 No appointments today.")
+        if not appts: st.info("📭 No appointments today.")
         else:
-            for appt in appointments:
-                with st.expander(f"🎫 Token {appt['token_number']} — {appt['patient_name']} ({appt['patient_age']}y) — {appt['status']}"):
-                    col1, col2 = st.columns(2)
-                    with col1:
-                        st.markdown(f"**📌 Chief Complaint:** {appt['chief_complaint']}")
-                        st.markdown(f"**🤒 Symptoms:** {appt['symptoms']}")
-                    with col2:
-                        reports = db.get_patient_reports(appt['patient_id'])
-                        if reports:
-                            st.markdown(f"**📄 Reports:** {len(reports)}")
-                            df = pd.DataFrame(reports[0]['parameters'])
-                            st.dataframe(df, use_container_width=True, hide_index=True)
+            for a in appts:
+                with st.expander(f"🎫 Token {a['token_number']} — {a['patient_name']} — {a['status']}"):
+                    p_data = db.get_patient(a['patient_id'])
                     
-                    col1, col2 = st.columns(2)
-                    with col1:
-                        if appt['status'] == 'Waiting':
-                            if st.button("▶️ Start", key=f"start_{appt['appointment_id']}"):
-                                db.update_appointment_status(appt['appointment_id'], 'In Consultation')
-                                st.rerun()
-                    with col2:
-                        if appt['status'] == 'In Consultation':
-                            if st.button("✅ Complete", key=f"done_{appt['appointment_id']}"):
-                                db.update_appointment_status(appt['appointment_id'], 'Completed')
-                                st.rerun()
+                    if p_data and p_data.get('red_flags'):
+                        st.error(f"🚨 EMERGENCY ALERT: Red-flag symptoms detected! ({p_data['red_flags']})")
                     
-                    if appt['status'] == 'In Consultation':
-                        st.markdown("#### 💊 Prescription")
-                        with st.form(f"presc_{appt['appointment_id']}"):
-                            diagnosis = st.text_input("Diagnosis")
-                            medicines = st.text_area("Medicines")
-                            advice = st.text_area("Advice")
-                            follow_up = st.date_input("Follow-up Date")
+                    c1, c2 = st.columns(2)
+                    with c1:
+                        st.write(f"**Complaint:** {a['chief_complaint']}")
+                        
+                        if p_data and p_data.get('ayurveda_data'):
+                            ayur = json.loads(p_data['ayurveda_data'])
+                            st.info(f"🕉️ **AYUSH:** Prakriti: {ayur.get('prakriti')} | Agni: {ayur.get('agni')} | Koshtha: {ayur.get('koshtha')}")
                             
-                            if st.form_submit_button("💾 Save"):
-                                db.save_prescription(
-                                    appt['appointment_id'], appt['patient_id'],
-                                    doctor['doctor_id'], diagnosis, medicines,
-                                    advice, str(follow_up)
-                                )
-                                try:
-                                    patient = db.get_patient(appt['patient_id'])
-                                    if patient:
-                                        sms_service.send_prescription_ready(
-                                            appt['patient_id'], patient['phone'],
-                                            patient['name'], doctor['name'], diagnosis
-                                        )
-                                except: pass
-                                st.success("✅ Prescription saved!")
-                                st.balloons()
-        
+                        st.markdown("### 📋 Completeness")
+                        chk = completeness_engine.check_clinical_completeness(p_data)
+                        for item, det in chk.items():
+                            if det['status'] == "Completed": st.success(f"✅ {item}")
+                            elif det['status'] == "Needs Verification": st.warning(f"⚠️ {item}")
+                            else: st.error(f"❌ {item}")
+                    
+                    with c2:
+                        reps = db.get_patient_reports(a['patient_id'])
+                        if reps and reps[0].get('file_data'):
+                            st.markdown(f"### {T['view_pdf']}")
+                            pdf_display = f'<iframe src="data:application/pdf;base64,{reps[0]["file_data"]}" width="100%" height="400" style="border:none; border-radius:10px; background: white;"></iframe>'
+                            st.markdown(pdf_display, unsafe_allow_html=True)
+                        else:
+                            st.info("No PDF Uploaded.")
+                    
+                    if a['status'] == 'In Consultation':
+                        with st.form(f"notes_{a['appointment_id']}"):
+                            st.markdown(f"#### {T['notes']}")
+                            notes = st.text_area("Observations", value=a.get('doctor_notes', ''))
+                            st.markdown(f"#### {T['presc']}")
+                            diag = st.text_input(T["diagnosis"])
+                            meds = st.text_area(T["meds"])
+                            advice = st.text_input("Advice", value="Rest")
+                            
+                            if st.form_submit_button(T["save"]):
+                                db.save_doctor_notes(a['appointment_id'], notes)
+                                db.save_prescription(a['appointment_id'], a['patient_id'], doc['doctor_id'], diag, meds, advice, str(datetime.today()))
+                                st.success("✅ Records Saved!")
         st.markdown('</div>', unsafe_allow_html=True)
 
 # ============================================================
-# PAGE: HEALTH TIPS
+# PAGE: AI CHATBOT & ABOUT
 # ============================================================
-elif page == "💡 Health Tips":
+elif page == "💬 AI Chatbot":
     st.markdown('<div class="ios-card">', unsafe_allow_html=True)
-    st.subheader("💡 Health Tips")
-    cols = st.columns(3)
-    for idx, tip in enumerate(health_tips):
-        with cols[idx % 3]:
-            st.markdown(f'<div class="tip-card">{tip}</div>', unsafe_allow_html=True)
+    for c in st.session_state.chat:
+        with st.chat_message("user"): st.write(c["q"])
+        with st.chat_message("assistant"): st.write(c["a"])
+    q = st.chat_input("Ask health questions...")
+    if q:
+        with st.chat_message("user"): st.write(q)
+        with st.chat_message("assistant"):
+            ans = ai_chat_response(q, None, st.session_state.logged_in_patient)
+            st.write(ans)
+        st.session_state.chat.append({"q": q, "a": ans})
     st.markdown('</div>', unsafe_allow_html=True)
 
-# ============================================================
-# PAGE: ABOUT
-# ============================================================
 elif page == "ℹ️ About":
     st.markdown('<div class="ios-card">', unsafe_allow_html=True)
-    st.subheader("ℹ️ About MediScan Pro v5.0")
-    st.markdown("""
-    **AI-Powered Patient Case-Taking & Hospital Management System**
-    
-    #### Features:
-    - 👤 Patient Registration + Login
-    - 🔐 Patient Login
-    - 👨‍⚕️ Doctor Login
-    - 📤 Report Upload + AI Analysis
-    - 🤖 XGBoost Risk Prediction (Diabetes + Heart)
-    - 💬 Groq AI Chatbot
-    - 🎫 Token Generation
-    - 👨‍⚕️ AI Specialist Assignment
-    - 💊 Online Prescription
-    - 📱 SMS Notifications
-    - 🩺 Doctor Dashboard
-    - 📜 Patient History
-    
-    ⚠️ **Disclaimer:** Screening tool only. Consult doctor.
-    """)
+    st.subheader(f"{T['about']} MediScan Pro")
+    st.markdown("**Version:** 8.0 (Multilingual + AYUSH + Voice + 3D UI)\n\n **Security:** PBKDF2 Hashing")
     st.markdown('</div>', unsafe_allow_html=True)
 
-# ============================================================
-# FOOTER
-# ============================================================
-st.markdown("""
-<div class="footer">
-    <p>🩺 MediScan Pro v5.0 • AI + Database + Hospital Management</p>
-    <p style="font-size:0.7rem;">⚠️ Demo • Not for diagnostic use</p>
-</div>
-""", unsafe_allow_html=True)
+# ---------- FOOTER ----------
+st.markdown("""<div class="footer"><p>🩺 MediScan Pro v8.0</p></div>""", unsafe_allow_html=True)
